@@ -32,6 +32,10 @@ pub(crate) struct Decisions {
     /// Vaults whose owner turned the vault tools off. They are on everywhere
     /// else - the note text is sent either way, and the tools only read.
     pub(crate) no_search_vaults: Vec<PathBuf>,
+    /// Whether the agent may do anything on this machine it can ask to do:
+    /// run commands, change and delete notes, look things up. Off - which is
+    /// how nuza ships - it may only read the vault, through nuza's own tools.
+    pub(crate) full_access: bool,
 }
 
 pub(crate) struct Store {
@@ -91,6 +95,12 @@ impl Store {
             .web_vaults
             .iter()
             .any(|kept| kept == vault)
+    }
+
+    /// Whether the agent may do anything it can ask to do, rather than only
+    /// read the vault.
+    pub(crate) fn full_access(&self) -> bool {
+        locked(&self.decisions).full_access
     }
 }
 

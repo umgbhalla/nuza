@@ -414,6 +414,7 @@ function AgentSettings({
     turnOff,
     setWebLookups,
     setVaultSearch,
+    setFullAccess,
     login,
     listModels,
   } = useAgent();
@@ -531,6 +532,16 @@ function AgentSettings({
             checked={state?.webLookups ?? false}
             disabled={!state?.hasVault || !agent}
             onCheckedChange={(allowed) => void setWebLookups(allowed)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Full access"
+          description="Lets the agent run commands on this computer and change, move and delete notes it can reach. Deleting moves a note to the trash; nothing else here can be undone. Off unless you need it."
+        >
+          <Switch
+            checked={state?.fullAccess ?? false}
+            disabled={!agent}
+            onCheckedChange={(allowed) => void setFullAccess(allowed)}
           />
         </SettingRow>
         {agent && models && models.length > 0 && (

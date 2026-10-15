@@ -120,6 +120,19 @@ export function useAgent() {
     [refresh]
   );
 
+  /** Lets the agent run commands and change notes, or stops it. */
+  const setFullAccess = useCallback(
+    async (allowed: boolean) => {
+      try {
+        await invoke<boolean>("agent_set_full_access", { allowed });
+      } catch (error) {
+        report("Couldn't change full access", error);
+      }
+      await refresh();
+    },
+    [refresh]
+  );
+
   /** Starts `codex login`, and looks again once it has had time to open a browser. */
   const login = useCallback(async () => {
     try {
@@ -153,6 +166,7 @@ export function useAgent() {
     warm,
     setWebLookups,
     setVaultSearch,
+    setFullAccess,
     login,
     listModels,
   };

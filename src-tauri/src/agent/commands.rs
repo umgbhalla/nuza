@@ -43,6 +43,9 @@ pub(crate) struct AgentState {
     pub(crate) has_vault: bool,
     /// Whether the agent may search this window's vault with nuza's tools.
     pub(crate) vault_search: bool,
+    /// Whether the agent may do anything it asks to do - run commands, change
+    /// and delete notes, fetch pages. Not tied to a window's vault.
+    pub(crate) full_access: bool,
     /// Whether the running agent can take the tools; `None` before it has said.
     pub(crate) agent_searches: Option<bool>,
 }
@@ -122,6 +125,7 @@ pub(crate) async fn agent_state(
         vault_search: vault
             .as_deref()
             .is_some_and(|vault| store.vault_search(vault)),
+        full_access: store.full_access(),
         agent_searches: harness.takes_tools().await,
     })
 }
@@ -381,6 +385,42 @@ pub(crate) async fn agent_set_web_lookups(
         }
     });
     harness.set_web_lookups(&vault, allowed);
+    Ok(allowed)
+}
+
+/// Lets the agent do anything it asks to do - run commands, change and delete
+/// notes, fetch pages - or stops letting it.
+///
+/// Not tied to a folder: it covers what the agent does wherever it is turned
+/// on, which is why turning it on is asked about first, in a dialog the
+/// webview cannot draw or click through.
+#[tauri::command]
+pub(crate) async fn agent_set_full_access(
+    window: WebviewWindow,
+    allowed: bool,
+    harness: State<'_, Arc<AgentHarness>>,
+    store: State<'_, Store>,
+) -> Result<bool, String> {
+    if allowed && !store.full_access() {
+        let name = harness
+            .current()
+            .map_or_else(|| "The agent".to_string(), |agent| agent.label());
+        let body = format!(
+            "{name} will be allowed to do whatever it asks to do, everywhere it is turned on.\n\n\
+             That includes running commands on this computer, and changing, moving and deleting notes \
+             in any folder nuza has shown it. A note can hold text written to talk an agent into things - \
+             a pasted article, a file someone shared - and with this on, a note like that could have \
+             {name} change other notes, or run a command.\n\n\
+             Deleting a note moves it to the trash, so it can be brought back. Everything else cannot.\n\n\
+             Leave it off unless you need it."
+        );
+        let title = "Give the agent full access?".to_string();
+        if !confirm(&window, title, body, "Give full access").await {
+            return Ok(false);
+        }
+    }
+    store.update(|decisions| decisions.full_access = allowed);
+    harness.set_full_access(allowed);
     Ok(allowed)
 }
 

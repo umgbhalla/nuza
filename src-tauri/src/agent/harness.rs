@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -189,13 +189,17 @@ struct ModelState {
 
 /// Which of the agent's permission requests are allowed. Everything is
 /// refused, except fetching a web page in a session on a vault whose owner
-/// turned web lookups on.
+/// turned web lookups on - unless the person turned full access on, which
+/// allows what the agent asks for, whatever it is.
 #[derive(Default)]
 pub(crate) struct Policy {
     web_vaults: Mutex<HashSet<PathBuf>>,
     session_vaults: Mutex<HashMap<String, PathBuf>>,
     /// Tool calls, by id, that were announced as calls to nuza's own server.
     nuza_calls: Mutex<HashSet<String>>,
+    /// Set from the store when the agent starts, and when the person turns
+    /// full access on or off while it runs.
+    full_access: AtomicBool,
 }
 
 /// Whether a tool call - as announced, or as asked permission for - is a
@@ -248,6 +252,9 @@ impl Gate for Policy {
     }
 
     fn allows(&self, request: &Value) -> bool {
+        if self.full_access.load(Ordering::Relaxed) {
+            return true;
+        }
         let Some(call) = request.get("toolCall") else {
             return false;
         };
@@ -377,6 +384,14 @@ impl AgentHarness {
         } else {
             vaults.remove(vault);
         }
+    }
+
+    /// Lets the agent do anything it asks to do - run commands, change and
+    /// delete notes, fetch pages - or stops letting it. Every request after
+    /// this is allowed, so the vault server's own tools are the only thing
+    /// still read-only when it is off.
+    pub(crate) fn set_full_access(&self, allowed: bool) {
+        self.policy.full_access.store(allowed, Ordering::Relaxed);
     }
 
     /// Stops the agent, and forgets every session.
@@ -1415,6 +1430,33 @@ mod tests {
         assert!(!policy.allows(&fetch("unknown")));
         // Still only a fetch: the same vault cannot run a command.
         assert!(!policy.allows(&json!({ "sessionId": "a", "toolCall": { "kind": "execute" } })));
+    }
+
+    #[test]
+    fn full_access_allows_what_the_agent_asks_for() {
+        let policy = Policy::default();
+        let call = |kind: &str| {
+            json!({ "sessionId": "a", "toolCall": { "kind": kind, "name": "bash" } })
+        };
+        // Off, nothing is allowed: not a command, not an edit, not a page.
+        assert!(!policy.allows(&call("execute")));
+        assert!(!policy.allows(&call("edit")));
+        assert!(!policy.allows(&call("fetch")));
+        // A request with no tool call in it is refused rather than guessed at.
+        assert!(!policy.allows(&json!({ "sessionId": "a" })));
+
+        policy.full_access.store(true, Ordering::Relaxed);
+        assert!(policy.allows(&call("execute")));
+        assert!(policy.allows(&call("edit")));
+        assert!(policy.allows(&call("delete")));
+        assert!(policy.allows(&call("move")));
+        assert!(policy.allows(&call("fetch")));
+        // Even one the policy cannot make sense of: it is the agent's to run,
+        // and the fence, not this, is what stands in its way.
+        assert!(policy.allows(&json!({ "sessionId": "a" })));
+
+        policy.full_access.store(false, Ordering::Relaxed);
+        assert!(!policy.allows(&call("execute")));
     }
 
     async fn coalesced(events: Vec<AgentEvent>, bytes: usize) -> Vec<AgentEvent> {

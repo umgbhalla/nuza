@@ -112,6 +112,7 @@ pub fn run() {
             for vault in &kept.web_vaults {
                 harness.set_web_lookups(vault, true);
             }
+            harness.set_full_access(kept.full_access);
             app.manage(decisions);
             app.manage(harness);
             app.manage(tools);
@@ -225,6 +226,7 @@ pub fn run() {
             agent::commands::agent_login,
             agent::commands::agent_set_web_lookups,
             agent::commands::agent_set_vault_search,
+            agent::commands::agent_set_full_access,
             agent::commands::agent_citable,
             agent::commands::agent_cite
         ])

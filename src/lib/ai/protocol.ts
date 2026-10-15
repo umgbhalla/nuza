@@ -58,6 +58,8 @@ export interface AgentState {
   /** Why it is not fenced in, where that is worth saying. */
   unfencedBecause: string | null;
   webLookups: boolean;
+  /** Whether the agent may run commands and change notes, everywhere. */
+  fullAccess: boolean;
   hasVault: boolean;
   /** Whether the agent may search this vault with nuza's read-only tools. */
   vaultSearch: boolean;
