@@ -286,6 +286,7 @@ fn fence_for(
         state_dirs: real(&launch.state_dirs),
         state_files: real(&launch.state_files),
         read_dirs: real(&read_dirs),
+        home_readable: launch.home_readable,
         scratch: Some(scratch.to_path_buf()),
     }
 }

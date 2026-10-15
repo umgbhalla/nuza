@@ -46,6 +46,8 @@ pub(crate) enum Access {
     ReadWrite,
     /// Read, and write to what is already there - for `/dev`.
     Device,
+    /// A directory's own listing, and nothing inside it.
+    List,
 }
 
 /// The system folders an agent may read, where they exist.
@@ -89,6 +91,12 @@ pub(crate) fn rules(fence: &Fence, system: &[PathBuf]) -> Vec<(PathBuf, Access)>
     }
     if let Some(home) = home {
         rules.push((home.join(".npmrc"), Access::Read));
+        // The listing of home itself, where an agent resolves the home folder
+        // as it starts. `READ_DIR` and no `READ_FILE`: what is in home can be
+        // named, never read.
+        if fence.home_readable {
+            rules.push((home.to_path_buf(), Access::List));
+        }
     }
     for dir in fence.state_dirs.iter().chain(&fence.scratch) {
         if !opens_home(dir) {
@@ -109,6 +117,7 @@ pub(crate) fn rules(fence: &Fence, system: &[PathBuf]) -> Vec<(PathBuf, Access)>
 fn rights(access: Access, handled: u64) -> u64 {
     let wanted = match access {
         Access::Read => EXECUTE | READ_FILE | READ_DIR,
+        Access::List => EXECUTE | READ_DIR,
         Access::ReadWrite => handled,
         Access::Device => EXECUTE | READ_FILE | READ_DIR | WRITE_FILE | TRUNCATE,
     };
@@ -285,6 +294,7 @@ mod tests {
                 PathBuf::from("/home"),
             ],
             scratch: Some(PathBuf::from("/tmp/nuza-agent-scratch")),
+            home_readable: false,
         }
     }
 
@@ -304,6 +314,22 @@ mod tests {
             Access::Read
         )));
         assert!(rules.contains(&(PathBuf::from("/home/me/.npmrc"), Access::Read)));
+    }
+
+    #[test]
+    fn an_agent_that_resolves_home_may_list_home_and_no_more() {
+        let fence = Fence {
+            home_readable: true,
+            ..fence()
+        };
+        let rules = rules(&fence, &system_reads(Path::new("/tmp")));
+        let (_, access) = rules
+            .iter()
+            .find(|(path, _)| path == Path::new("/home/me"))
+            .expect("an agent that resolves home is given its listing");
+        assert_eq!(*access, Access::List);
+        // The listing only: opening a file in home is still refused.
+        assert_eq!(rights(Access::List, handled(3)) & READ_FILE, 0);
     }
 
     #[test]

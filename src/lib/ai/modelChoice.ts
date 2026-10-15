@@ -54,7 +54,9 @@ export function chooseModel(
 function cost(model: ModelInfo): number {
   const name = `${model.id} ${model.name}`.toLowerCase();
   let score = 5;
-  // OpenCode Go's models need a Go subscription, "free" in the name or not.
+  // A gateway of its own that needs a subscription, whatever the model says:
+  // v1 listed these as `opencode-go/…`. v2 names its own gateway `opencode/`,
+  // and everything it serves there is free, so the name decides.
   if (/^opencode-go\//.test(model.id)) score = 4;
   else if (/\bfree\b|-free\b|big-pickle/.test(name)) score = 0;
   else if (/\bnano\b|-nano\b/.test(name)) score = 1;

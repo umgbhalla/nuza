@@ -26,6 +26,30 @@ bun run tauri build
 
 Once finished, you can find the compiled binaries in the `src-tauri/target/release` directory.
 
+## Testing
+
+The unit tests are self-contained and run offline:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+bun test
+```
+
+The tests that talk to a real agent are opt-in (`#[ignore]`), cost a turn on
+your own plan, and are the only proof that an adapter still works. Run one by
+name, and pin it to a model your plan can actually use: an agent's configured
+default is often not one, and the failure reads as "isn't signed in".
+
+```bash
+NUZA_LIVE_MODEL=opencode/deepseek-v4.1-flash-free \
+  cargo test --manifest-path src-tauri/Cargo.toml --lib \
+  real_opencode_streams_through_the_harness -- --ignored --nocapture
+```
+
+`NUZA_LIVE_MODEL` is optional everywhere; leave it unset to test whatever the
+agent defaults to. `NUZA_PROMPT_FILE` points
+`real_opencode_answers_a_prompt_from_a_file` at a prompt file.
+
 ## Contribution Workflow
 
 ### 1. Discuss Before Coding (Issue-First)

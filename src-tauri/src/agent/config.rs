@@ -65,6 +65,11 @@ pub(crate) struct Launch {
     /// Folders inside home the agent may read but not write: its own program,
     /// when that lives in home.
     pub(crate) read_dirs: Vec<PathBuf>,
+    /// Whether the agent may read the home folder's own directory entry - its
+    /// listing, and nothing inside it. OpenCode resolves the home folder
+    /// itself while it starts, and refuses to run at all when that read is
+    /// refused, so this is the smallest hole that lets it work.
+    pub(crate) home_readable: bool,
 }
 
 impl AgentConfig {
@@ -167,6 +172,7 @@ impl AgentConfig {
                     .collect(),
                 state_files: [".claude.json"].into_iter().filter_map(in_home).collect(),
                 read_dirs: Vec::new(),
+                home_readable: false,
             },
             AgentConfig::Codex => Launch {
                 program: "npx".to_string(),
@@ -179,6 +185,7 @@ impl AgentConfig {
                 state_dirs: [".npm", ".codex"].into_iter().filter_map(in_home).collect(),
                 state_files: Vec::new(),
                 read_dirs: Vec::new(),
+                home_readable: false,
             },
             AgentConfig::OpenCode => Launch {
                 program: "opencode".to_string(),
@@ -193,7 +200,20 @@ impl AgentConfig {
                 .filter_map(in_home)
                 .collect(),
                 state_files: Vec::new(),
-                read_dirs: Vec::new(),
+                // OpenCode discovers skills and settings from the folders at
+                // the top of home that the other agents keep theirs in, and
+                // it reads them, not just lists them. A fence that refuses
+                // those reads does not make it fall back to nuza's own
+                // settings: OpenCode fails the whole session with "Internal
+                // service failure". So the two folders are readable, and
+                // only readable - neither is writable, and the vault is
+                // still out of reach, since notes reach the agent inside the
+                // prompt and nowhere else.
+                read_dirs: [".claude", ".agents"]
+                    .into_iter()
+                    .filter_map(in_home)
+                    .collect(),
+                home_readable: true,
             },
             AgentConfig::Custom {
                 command,
@@ -232,6 +252,7 @@ impl AgentConfig {
                         .collect(),
                     state_files: Vec::new(),
                     read_dirs,
+                    home_readable: false,
                 }
             }
         };
@@ -295,6 +316,20 @@ mod tests {
             (opencode.program.as_str(), opencode.args.as_slice()),
             ("opencode", &["acp".to_string()][..])
         );
+        // OpenCode reads the other agents' folders at the top of home while
+        // it starts, so the fence has to let it read them.
+        assert_eq!(
+            opencode.read_dirs,
+            [
+                PathBuf::from("/Users/me/.claude"),
+                PathBuf::from("/Users/me/.agents"),
+            ]
+        );
+        // It also resolves the home folder itself while it starts, and
+        // refuses to run when that read is refused - so it needs home's
+        // listing, which the other agents do not.
+        assert!(opencode.home_readable);
+        assert!(!claude.home_readable && !codex.home_readable);
     }
 
     #[test]

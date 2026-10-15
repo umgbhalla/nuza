@@ -1208,7 +1208,7 @@ async fn real_claude_streams_through_the_harness() {
             "main",
             None,
             "Reply with exactly: hello from nuza",
-            None,
+            live_model().as_deref(),
             panel.emit(),
         )
         .await;
@@ -1222,6 +1222,18 @@ async fn real_claude_streams_through_the_harness() {
     harness.shutdown().await;
 }
 
+/// The model a live test runs on: `NUZA_LIVE_MODEL` when it is set, so a run
+/// can be pointed at a model the signed-in plan actually has, and the agent's
+/// own default when it is not. An agent's configured default is sometimes not
+/// one the account can use, which comes back as "isn't signed in" - set this
+/// to pin a live run to the model under test.
+fn live_model() -> Option<String> {
+    std::env::var("NUZA_LIVE_MODEL")
+        .ok()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+}
+
 /// Opt-in: the real OpenCode, signed in, on its own plan.
 #[tokio::test]
 #[ignore]
@@ -1229,13 +1241,18 @@ async fn real_opencode_streams_through_the_harness() {
     let harness = real_agent(AgentConfig::OpenCode).await;
     let models = harness.list_models().await.unwrap();
     println!("MODELS: {}", models.len());
+    let model = live_model();
+    println!(
+        "MODEL: {}",
+        model.as_deref().unwrap_or("(the agent's default)")
+    );
     let panel = Panel::default();
     let outcome = harness
         .prompt(
             "main",
             None,
             "Reply with exactly: hello from nuza",
-            None,
+            model.as_deref(),
             panel.emit(),
         )
         .await;
@@ -1251,6 +1268,26 @@ async fn real_opencode_streams_through_the_harness() {
         "it said: {:?}",
         panel.said()
     );
+
+    // A second turn in the same window: OpenCode resumes the session it kept
+    // for it, rather than starting one.
+    let again = Panel::default();
+    let resumed = harness
+        .prompt(
+            "main",
+            None,
+            "Reply with exactly: back again",
+            model.as_deref(),
+            again.emit(),
+        )
+        .await;
+    println!("RESUMED: {resumed:?} SAID: {}", again.said());
+    assert!(resumed.is_ok(), "resuming the session failed: {resumed:?}");
+    assert!(
+        again.said().to_lowercase().contains("back again"),
+        "it said: {:?}",
+        again.said()
+    );
     harness.shutdown().await;
 }
 
@@ -1265,7 +1302,7 @@ async fn real_codex_streams_through_the_harness() {
             "main",
             None,
             "Reply with exactly: hello from nuza",
-            None,
+            live_model().as_deref(),
             panel.emit(),
         )
         .await;
@@ -1600,7 +1637,13 @@ async fn ask_with_tools(config: AgentConfig, question: &str) -> Panel {
         .unwrap();
     let panel = Panel::default();
     let outcome = harness
-        .prompt("main", Some(&root), question, None, panel.emit())
+        .prompt(
+            "main",
+            Some(&root),
+            question,
+            live_model().as_deref(),
+            panel.emit(),
+        )
         .await;
     for event in panel.events() {
         if !matches!(event, AgentEvent::Token { .. }) {
@@ -1939,7 +1982,13 @@ async fn real_opencode_answers_a_prompt_from_a_file() {
     let harness = real_agent(AgentConfig::OpenCode).await;
     let panel = Panel::default();
     let outcome = harness
-        .prompt("main", None, prompt.as_str(), None, panel.emit())
+        .prompt(
+            "main",
+            None,
+            prompt.as_str(),
+            live_model().as_deref(),
+            panel.emit(),
+        )
         .await;
     println!("ANSWER: {}", panel.said());
     println!("OUTCOME: {outcome:?}");

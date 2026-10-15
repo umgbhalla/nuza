@@ -12,8 +12,10 @@
 //!   sign-in, its npm cache - and a scratch folder nuza gives it as `TMPDIR`.
 //!   Not the session's working directory, not the vault, not the home folder.
 //! - **The home folder cannot be read**, except that same state, `~/.npmrc`,
-//!   and the folders the agent's own programs live in when they live in home
-//!   (an nvm Node, a script a custom agent runs). The vault lives in home, so
+//!   the folders the agent's own programs live in when they live in home
+//!   (an nvm Node, a script a custom agent runs), and - for an agent that
+//!   resolves the home folder itself as it starts - the *listing* of home,
+//!   names only, never a byte of what is in it. The vault lives in home, so
 //!   the agent cannot read it: notes reach it through the prompt, and nothing
 //!   else. Nor `~/.ssh`, nor a browser's profile, nor another vault.
 //! - **`/Volumes` cannot be read**, so an external disk is no way around it.
@@ -33,6 +35,9 @@ pub(crate) struct Fence {
     pub(crate) state_files: Vec<PathBuf>,
     /// Folders in home the agent may read.
     pub(crate) read_dirs: Vec<PathBuf>,
+    /// Whether the agent may read the home folder's own directory entry - its
+    /// listing, not the contents of anything inside it.
+    pub(crate) home_readable: bool,
     /// Somewhere outside the vault and the session directories the agent may
     /// write freely - its `TMPDIR`.
     pub(crate) scratch: Option<PathBuf>,
@@ -58,6 +63,16 @@ pub(crate) fn profile(fence: &Fence) -> String {
             reads.push_str(&format!(
                 "(allow file-read-data (subpath \"{}\"))\n",
                 quote(dir)
+            ));
+        }
+        // The listing of home itself, where an agent resolves the home folder
+        // as it starts: the names of what is in home, never a byte of it. The
+        // denies stay in place for everything below, so nothing in home can
+        // actually be read.
+        if fence.home_readable {
+            reads.push_str(&format!(
+                "(allow file-read-data (literal \"{}\"))\n",
+                quote(home)
             ));
         }
         reads.push_str(&format!(
@@ -177,6 +192,7 @@ mod tests {
             state_files: vec![PathBuf::from("/Users/me/.claude.json")],
             read_dirs: vec![PathBuf::from("/Users/me/.nvm/versions/node/v24")],
             scratch: Some(PathBuf::from("/private/tmp/nuza-agent-scratch")),
+            home_readable: false,
         }
     }
 
@@ -226,6 +242,24 @@ mod tests {
         let profile = profile(&fence);
         assert!(!profile.contains("(allow file-read-data (subpath \"/Users/me\"))"));
         assert!(!profile.contains("(allow file-write* (subpath \"/Users/me\"))"));
+    }
+
+    #[test]
+    fn an_agent_that_resolves_home_sees_its_listing_and_nothing_more() {
+        let fence = Fence {
+            home_readable: true,
+            ..fence()
+        };
+        let profile = profile(&fence);
+        let lock = profile
+            .find("(deny file-read-data (subpath \"/Users/me\"))")
+            .unwrap();
+        let listing = profile
+            .find("(allow file-read-data (literal \"/Users/me\"))")
+            .unwrap_or_else(|| panic!("no listing rule in {profile}"));
+        assert!(lock < listing, "the listing rule must come after the lock");
+        // The listing is home's own entry, never a folder inside it.
+        assert!(!profile.contains("(allow file-read-data (subpath \"/Users/me\"))"));
     }
 
     #[test]
@@ -289,6 +323,10 @@ mod tests {
         }
 
         fn machine() -> Machine {
+            machine_with(false)
+        }
+
+        fn machine_with(home_readable: bool) -> Machine {
             // Seatbelt matches real paths, and the temp folder is behind a link.
             let root = tempfile::tempdir().unwrap();
             let base = root.path().canonicalize().unwrap();
@@ -311,6 +349,7 @@ mod tests {
                 home: Some(home.clone()),
                 state_dirs: vec![home.join(".npm")],
                 scratch: Some(scratch),
+                home_readable,
                 ..Fence::default()
             });
             Machine {
@@ -365,6 +404,31 @@ mod tests {
                 &format!("cat '{}'", machine.home.join(".npm/cached.txt").display()),
             );
             assert!(ok && said.contains("package"), "{said}");
+        }
+
+        #[test]
+        fn an_agent_that_resolves_home_can_name_home_but_not_open_it() {
+            let machine = machine_with(true);
+            // Home's own listing is readable: an agent that resolves the home
+            // folder while it starts is satisfied by the names in it.
+            let (ok, said) = run(&machine, &format!("ls '{}'", machine.home.display()));
+            assert!(ok && said.contains("Documents"), "{said}");
+            // Nothing inside home is listable or readable.
+            for target in ["Documents", "Documents/vault", ".ssh"] {
+                let (ok, said) = run(
+                    &machine,
+                    &format!("ls '{}'", machine.home.join(target).display()),
+                );
+                assert!(!ok, "{target} could be listed: {said}");
+            }
+            for secret in ["Documents/vault/note.md", ".ssh/id_rsa"] {
+                let (ok, said) = run(
+                    &machine,
+                    &format!("cat '{}'", machine.home.join(secret).display()),
+                );
+                assert!(!ok, "{secret} was readable: {said}");
+                assert!(!said.contains("the-secret-words") && !said.contains("PRIVATE KEY"));
+            }
         }
 
         #[test]

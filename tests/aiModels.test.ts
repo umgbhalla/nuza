@@ -15,12 +15,12 @@ const claude = offered(
   ["claude-haiku-4-5-20251001", "Haiku 4.5"]
 );
 const opencode = offered(
-  // Listed first, and "free" - but a Go model, which needs a Go subscription.
-  ["opencode-go/cat-jam-free", "OpenCode Go/Cat Jam Free"],
-  ["opencode-go/deepseek-v4-pro", "OpenCode Go/DeepSeek V4 Pro (New)"],
-  ["opencode-go/glm-5.3-flash", "OpenCode Go/GLM-5.3-Flash"],
-  ["opencode/big-pickle", "OpenCode/Big Pickle"],
-  ["opencode/nemotron-3.5-lightning-free", "OpenCode/Nemotron 3.5 Lightning Free"]
+  // As OpenCode v2 lists them: everything on its own gateway is free.
+  ["opencode/cat-jam-free", "Cat Jam Free"],
+  ["opencode/deepseek-v4.1-flash-free", "DeepSeek V4.1 Flash Free"],
+  ["opencode/mimo-v2.6-flash-free", "MiMo-V2.6-Flash Free"],
+  ["opencode/nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning Free"],
+  ["opencode/big-pickle", "Big Pickle"]
 );
 const codex = offered(
   ["gpt-5.5[high]", "gpt-5.5 (high)"],
@@ -34,8 +34,17 @@ describe("the cheapest model", () => {
     expect(cheapestModel(claude)).toBe("haiku");
   });
 
-  test("for OpenCode is a free one that needs no subscription", () => {
-    expect(cheapestModel(opencode)).toBe("opencode/big-pickle");
+  test("for OpenCode is a free one, not the agent's default entry", () => {
+    expect(cheapestModel(opencode)).toBe("opencode/cat-jam-free");
+  });
+
+  test("is a free one, not a gateway that needs a subscription", () => {
+    // v1 listed its paying gateway beside the free models, first.
+    const withPaidGateway = offered(
+      ["opencode-go/cat-jam-free", "OpenCode Go/Cat Jam Free"],
+      ["opencode/big-pickle", "OpenCode/Big Pickle"]
+    );
+    expect(cheapestModel(withPaidGateway)).toBe("opencode/big-pickle");
   });
 
   test("for Codex is the small model at the least effort", () => {

@@ -14,6 +14,7 @@ temporary directory is `<tmp>/session`.
 | -------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | Claude Code (a paid Claude plan) | `npx -y --cache ~/.npm/_nuza-claude @agentclientprotocol/claude-agent-acp@0.90.0` | **103 s** cold (npx fetching the adapter), **2.1 s** warm |
 | OpenCode 1.15.13                 | `opencode acp`                                                                    | 20 s (its plugins loading)                                |
+| OpenCode 2.0.29                  | `opencode acp`                                                                    | ~0.1 s (see [OpenCode v2](#opencode-v2-2029))             |
 | Codex                            | `npx -y @agentclientprotocol/codex-acp@<pin>`                                     | not recorded: no Codex on the recording machine           |
 
 To record again, run the opt-in test, which goes through nuza's own client:
@@ -115,6 +116,47 @@ The session directory was still empty afterwards.
 The model this OpenCode was configured with answered nothing at all - a turn
 that ends `end_turn` with no words. That is a real outcome the panel has to
 render, not an error the client can detect.
+
+### OpenCode v2 (2.0.29)
+
+Recorded 2026-10-15, same client. v2 answers `initialize` at once, and its
+capabilities have moved on from 1.15.13:
+
+- `mcpCapabilities.sse` is `false` (`http` is still `true`), so nuza registers
+  its vault server over the HTTP transport.
+- `sessionCapabilities` has grown `additionalDirectories`, `delete` and
+  `resume`, alongside the earlier `close`, `fork` and `list`.
+- `agentCapabilities._meta` carries
+  `{"opencode/child-session-updates":true}`, and `session/prompt` answers with
+  `"_meta":{}`.
+- There is no `authMethods` and no `agentInfo` any more, and no plugin line on
+  stdout: `initialize` is answered in about a tenth of a second, not 20 s.
+- Model ids in `configOptions` are `provider/model` - `opencode/big-pickle`,
+  `opencode/deepseek-v4.1-flash-free`, `anthropic/claude-fable-5`. v1 listed
+  its paying gateway as `opencode-go/…`; v2 names its own gateway `opencode/`,
+  and everything it serves there is free.
+
+Two reads at start-up decide the fence, and both are easy to miss, because
+neither is mentioned in what the agent says over the protocol:
+
+| Read                                                                  | What the fence does                                                                                                                                                                             |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `~/.claude` and `~/.agents`, for skills and settings - read, not only listed | Both are opened read-only for OpenCode (`read_dirs`). Refuse them and `session/new` fails with `-32603 Internal error: Internal service failure` (`ClientError`, `EPERM: lstat '~/.claude'`) |
+| `realPath` of the home folder itself, for its instruction sources      | OpenCode is given the *listing* of home - `(allow file-read-data (literal "…"))`, names only, never a byte inside it. Refuse it and instruction initialization is blocked, the session never drains, and `session/prompt` hangs with no `session/update` at all |
+
+A turn that reaches its model ends normally, with `stopReason: "end_turn"`. A
+turn on a model the account cannot use ends just as promptly, with an error on
+`session/prompt`:
+
+```
+-> {"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"ses_ec0e…","prompt":[{"type":"text","text":"Reply with exactly: PROBE OK"}]}}
+<- {"jsonrpc":"2.0","id":4,"error":{"code":-32000,"message":"Authentication required: provider authentication required","data":{}}}
+```
+
+That is v2's own default model being one the plan does not cover, not a broken
+client: `opencode run` on the same default fails outside nuza too, with `Error:
+User not found.`. The opt-in tests take `NUZA_LIVE_MODEL` for exactly this
+reason - an agent's configured default is often not a model the account has.
 
 ## Codex
 
