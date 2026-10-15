@@ -408,7 +408,8 @@ pub(crate) async fn agent_set_full_access(
             .map_or_else(|| "The agent".to_string(), |agent| agent.label());
         let body = format!(
             "{name} will be allowed to do whatever it asks to do, everywhere it is turned on.\n\n\
-             That includes running commands on this computer, and changing, moving and deleting notes \
+             It will run on this computer without the sandbox nuza normally keeps it in, so it can \
+             run commands and reach files the way you can. It can also change, move and delete notes \
              in any folder nuza has shown it. A note can hold text written to talk an agent into things - \
              a pasted article, a file someone shared - and with this on, a note like that could have \
              {name} change other notes, or run a command.\n\n\
@@ -423,6 +424,10 @@ pub(crate) async fn agent_set_full_access(
     store.update(|decisions| decisions.full_access = allowed);
     harness.set_full_access(allowed);
     tools.set_writes(allowed);
+    // Both the fence and the session's mode were settled when this agent
+    // started, so neither changes under a running one. It is stopped, and the
+    // next question starts it the new way - which is a fresh conversation.
+    harness.shutdown().await;
     Ok(allowed)
 }
 

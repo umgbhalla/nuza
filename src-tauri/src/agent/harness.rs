@@ -58,7 +58,8 @@ const ASKS_FIRST: [&str; 4] = ["read-only", "default", "ask", "manual"];
 
 /// How an agent is started, given its config. Real ones go through
 /// `start::command_for`; the tests start the mock.
-pub(crate) type Launcher = Arc<dyn Fn(&AgentConfig) -> Result<Command, String> + Send + Sync>;
+pub(crate) type Launcher =
+    Arc<dyn Fn(&AgentConfig, bool) -> Result<Command, String> + Send + Sync>;
 /// Where a turn's events go: a window's IPC channel, or a test's list.
 pub(crate) type Emit = Arc<dyn Fn(AgentEvent) + Send + Sync>;
 
@@ -237,6 +238,14 @@ pub(crate) fn is_nuza_call(call: &Value) -> bool {
         )
 }
 
+impl Policy {
+    /// Whether the person has turned full access on: the agent may do
+    /// anything it asks to do, and it is started without a fence.
+    pub(crate) fn full_access(&self) -> bool {
+        self.full_access.load(Ordering::Relaxed)
+    }
+}
+
 impl Gate for Policy {
     fn saw(&self, update: &Value) {
         let Some(update) = update.get("update") else {
@@ -252,7 +261,7 @@ impl Gate for Policy {
     }
 
     fn allows(&self, request: &Value) -> bool {
-        if self.full_access.load(Ordering::Relaxed) {
+        if self.full_access() {
             return true;
         }
         let Some(call) = request.get("toolCall") else {
@@ -631,9 +640,12 @@ impl AgentHarness {
             .ok_or_else(|| "no agent is turned on".to_string())?;
         let launcher = Arc::clone(&self.launcher);
         let for_launcher = config.clone();
+        // The fence is settled when the process starts, so it is read here:
+        // turning full access on or off is what starts the next process.
+        let fence = !self.policy.full_access();
         // Building the command can ask the login shell for its PATH, which
         // blocks.
-        let command = tokio::task::spawn_blocking(move || launcher(&for_launcher))
+        let command = tokio::task::spawn_blocking(move || launcher(&for_launcher, fence))
             .await
             .map_err(|error| error.to_string())??;
 
@@ -786,7 +798,14 @@ impl AgentHarness {
             }
         };
 
-        lock_down(&connection.client, config, &id, &answer).await?;
+        lock_down(
+            &connection.client,
+            config,
+            &id,
+            &answer,
+            self.policy.full_access(),
+        )
+        .await?;
         self.record_models(&answer);
         let model = self
             .move_off_unoffered(connection, config, &id, &answer)
@@ -1113,12 +1132,20 @@ async fn coalesce(
 /// An agent with modes, none of which asks, is not used at all. An agent
 /// with no modes is asked for `read-only` in case, and the sandbox is what
 /// holds.
+///
+/// With full access on this does nothing: the session keeps the mode it
+/// started in, which is the one whose code runner reaches the most tools.
+/// nuza's gate still sees every request - it is only that it now says yes.
 async fn lock_down(
     client: &RpcClient,
     config: &AgentConfig,
     session: &str,
     answer: &Value,
+    full_access: bool,
 ) -> Result<(), String> {
+    if full_access {
+        return Ok(());
+    }
     let modes = answer.get("modes");
     let available: Vec<&str> = modes
         .and_then(|modes| modes.get("availableModes"))

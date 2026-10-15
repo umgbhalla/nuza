@@ -488,7 +488,7 @@ async fn harnessed(flavor: &'static str) -> Harnessed {
     let one_at_a_time = one_at_a_time().await;
     let root = tempfile::tempdir().unwrap();
     let sessions = root.path().canonicalize().unwrap().join("sessions");
-    let harness = AgentHarness::new(Arc::new(move |_| Ok(mock(flavor))), sessions.clone());
+    let harness = AgentHarness::new(Arc::new(move |_, _| Ok(mock(flavor))), sessions.clone());
     harness.restore(Some(match flavor {
         "codex" => AgentConfig::Codex,
         "claude" => AgentConfig::ClaudeCode,
@@ -513,7 +513,7 @@ async fn harnessed(flavor: &'static str) -> Harnessed {
 async fn the_agent_is_offered_no_files_and_no_terminal() {
     let mut h = harnessed("claude").await;
     h.harness = AgentHarness::new(
-        Arc::new(|_| {
+        Arc::new(|_, _| {
             let mut command = mock("claude");
             command.arg("--strict-client");
             Ok(command)
@@ -1323,7 +1323,7 @@ async fn real_codex_streams_through_the_harness() {
 #[ignore]
 async fn real_claude_starts_from_a_cold_cache_inside_the_fence() {
     let command =
-        tokio::task::spawn_blocking(|| super::start::command_for(&AgentConfig::ClaudeCode))
+        tokio::task::spawn_blocking(|| super::start::command_for(&AgentConfig::ClaudeCode, true))
             .await
             .unwrap()
             .expect("a command for Claude Code");
@@ -1386,7 +1386,7 @@ async fn with_tools(http: bool) -> (Harnessed, Arc<FakeTools>, tempfile::TempDir
     let tools = Arc::new(FakeTools::default());
     let root = tempfile::tempdir().unwrap();
     let sessions = root.path().canonicalize().unwrap().join("sessions");
-    let launcher: super::harness::Launcher = Arc::new(move |_| {
+    let launcher: super::harness::Launcher = Arc::new(move |_, _| {
         let mut command = mock("claude");
         if !http {
             command.arg("--no-http-mcp");
@@ -1993,4 +1993,51 @@ async fn real_opencode_answers_a_prompt_from_a_file() {
     println!("ANSWER: {}", panel.said());
     println!("OUTCOME: {outcome:?}");
     harness.shutdown().await;
+}
+
+/// Full access is the fence off, and the launcher is what decides: turning it
+/// on stops the agent, and the next turn starts it with no fence at all.
+#[tokio::test]
+async fn full_access_starts_the_agent_without_a_fence() {
+    let seen: Arc<std::sync::Mutex<Vec<bool>>> = Arc::default();
+    let before = Arc::clone(&seen);
+    let root = tempfile::tempdir().unwrap();
+    let sessions = root.path().canonicalize().unwrap().join("sessions");
+    let harness = AgentHarness::new(
+        Arc::new(move |_, fence| {
+            before.lock().unwrap().push(fence);
+            Ok(mock("claude"))
+        }),
+        sessions,
+    );
+    harness.restore(Some(AgentConfig::ClaudeCode));
+    let vault = tempfile::tempdir().unwrap();
+
+    let panel = Panel::default();
+    let _ = timeout(
+        Duration::from_secs(20),
+        harness.prompt("main", Some(vault.path()), "hello", None, panel.emit()),
+    )
+    .await
+    .expect("the turn ends");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![true],
+        "without full access the agent is started fenced in"
+    );
+
+    harness.set_full_access(true);
+    harness.shutdown().await;
+    let panel = Panel::default();
+    let _ = timeout(
+        Duration::from_secs(20),
+        harness.prompt("main", Some(vault.path()), "hello", None, panel.emit()),
+    )
+    .await
+    .expect("the turn ends");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![true, false],
+        "full access starts the next agent without a fence"
+    );
 }

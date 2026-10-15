@@ -536,7 +536,7 @@ function AgentSettings({
         </SettingRow>
         <SettingRow
           title="Full access"
-          description="Lets the agent run commands on this computer and change, move and delete notes it can reach. Deleting moves a note to the trash; nothing else here can be undone. Off unless you need it."
+          description="Lets the agent run commands on this computer, outside the sandbox nuza normally keeps it in, and change, move and delete notes it can reach. Deleting moves a note to the trash; nothing else here can be undone. Off unless you need it. Changing it starts a new conversation."
         >
           <Switch
             checked={state?.fullAccess ?? false}

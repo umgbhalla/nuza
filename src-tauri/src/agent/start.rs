@@ -158,7 +158,10 @@ pub(crate) fn no_window_std(command: &mut std::process::Command) {
 }
 
 /// The command that starts `config`'s agent.
-pub(crate) fn command_for(config: &AgentConfig) -> Result<Command, String> {
+///
+/// `fence` holds it in with a sandbox. It is off only for full access, when
+/// the person has asked for the agent to have the machine the way they do.
+pub(crate) fn command_for(config: &AgentConfig, fence: bool) -> Result<Command, String> {
     let path = crate::shellpath::path();
     let home = home_dir();
     let launch = config.launch(home.as_deref())?;
@@ -178,8 +181,13 @@ pub(crate) fn command_for(config: &AgentConfig) -> Result<Command, String> {
     std::fs::create_dir_all(&scratch)
         .map_err(|error| format!("could not start {name}: no scratch folder: {error}"))?;
 
-    let mut command = fenced(&program, &launch, home.as_deref(), &path, &scratch)
-        .map_err(|error| format!("could not start {name}: {error}"))?;
+    let mut command = if fence {
+        fenced(&program, &launch, home.as_deref(), &path, &scratch)
+            .map_err(|error| format!("could not start {name}: {error}"))?
+    } else {
+        log::info!("full access is on: {name} starts without a fence");
+        unfenced(&program, &launch)
+    };
     no_window(&mut command);
     leave_appimage(&mut command);
     command
