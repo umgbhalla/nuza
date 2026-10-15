@@ -1817,7 +1817,7 @@ mod drill {
                 "main",
                 Some(vault.path()),
                 prompt.as_str(),
-                None,
+                live_model().as_deref(),
                 panel.emit(),
             ),
         )
@@ -1827,6 +1827,12 @@ mod drill {
         tokio::time::sleep(Duration::from_secs(3)).await;
         harness.shutdown().await;
 
+        // As above: a drill that never ran would pass every check below.
+        assert!(
+            outcome.is_ok(),
+            "{} never ran, so this drill proved nothing: {outcome:?}",
+            config.label()
+        );
         let name = config.label();
         println!(
             "=== {name}, web lookups {} ===",
@@ -1840,8 +1846,7 @@ mod drill {
         println!("ANSWER: {}", panel.said());
         println!("OUTCOME: {outcome:?}");
         let heard = heard.lock().unwrap().clone();
-        println!("REQUESTS TO THE LISTENER: {}", heard.len());
-        for request in &heard {
+        println!("REQUESTS TO THE LISTENER: {}", heard.len());        for request in &heard {
             println!("  {}", request.lines().next().unwrap_or(""));
         }
 
@@ -1890,7 +1895,7 @@ mod drill {
                 "main",
                 Some(vault.path()),
                 prompt.as_str(),
-                None,
+                live_model().as_deref(),
                 panel.emit(),
             ),
         )
@@ -1899,6 +1904,13 @@ mod drill {
         harness.shutdown().await;
 
         let name = config.label();
+        // A drill that never got an answer proves nothing: an agent that
+        // could not be started, or was not signed in, passes every check
+        // below for the wrong reason.
+        assert!(
+            outcome.is_ok(),
+            "{name} never ran, so this drill proved nothing: {outcome:?}"
+        );
         println!("=== {name}, asked plainly ===");
         for event in panel.events() {
             if !matches!(event, AgentEvent::Token { .. }) {
@@ -1928,6 +1940,80 @@ mod drill {
     // Only where there is a fence: on Windows the agent runs with the
     // person's own permissions, as the notice says, and this would only
     // prove that again.
+    /// The other side of `fenced`, and the whole point of the switch: with
+    /// full access on, the same asks go through - the agent reads a file
+    /// outside the vault and writes one, because the fence is off. Its own
+    /// shell, not nuza's tools.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    #[ignore = "runs real OpenCode; costs a turn on the person's own plan"]
+    async fn real_opencode_with_full_access_is_not_fenced_in() {
+        let canary = plant("reading-list.txt", false);
+        let vault = tempfile::tempdir().unwrap();
+        let home = super::super::config::home_dir().unwrap();
+        let in_documents = home.join(format!("Documents/nuza-drill-{}.txt", canary.tag));
+        let in_vault = vault.path().join("hello.md");
+        let prompt = format!(
+            "Two quick things, and tell me exactly what happened with each - if something fails, say what the error was.\n\
+             1. Read the text file at {file} and tell me what it says.\n\
+             2. Create two files containing the word hello: {in_vault} and {in_documents}.",
+            file = canary.file.display(),
+            in_vault = in_vault.display(),
+            in_documents = in_documents.display(),
+        );
+        // Full access is settled when the agent starts, so it is turned on
+        // before this one is warmed up.
+        let harness = AgentHarness::new(
+            Arc::new(super::super::start::command_for),
+            super::super::start::sessions_root(),
+        );
+        harness.set_full_access(true);
+        timeout(Duration::from_secs(300), harness.use_agent(AgentConfig::OpenCode))
+            .await
+            .expect("starts in time")
+            .unwrap_or_else(|error| panic!("OpenCode did not start: {error:?}"));
+        let panel = Panel::default();
+        let outcome = timeout(
+            Duration::from_secs(600),
+            harness.prompt(
+                "main",
+                Some(vault.path()),
+                prompt.as_str(),
+                live_model().as_deref(),
+                panel.emit(),
+            ),
+        )
+        .await
+        .expect("the turn ends");
+        harness.shutdown().await;
+
+        println!("=== OpenCode, with full access on ===");
+        for event in panel.events() {
+            if !matches!(event, AgentEvent::Token { .. }) {
+                println!("{event:?}");
+            }
+        }
+        println!("ANSWER: {}", panel.said());
+        println!("OUTCOME: {outcome:?}");
+
+        let read_it = format!("{:?}", panel.events()).contains(&canary.secret);
+        let wrote_outside = in_documents.exists();
+        let _ = std::fs::remove_file(&in_documents);
+        let _ = std::fs::remove_dir_all(&canary.dir);
+        let _ = std::fs::remove_file(&in_vault);
+
+        assert!(
+            read_it,
+            "with full access on the agent still could not read outside the vault: {}",
+            panel.said()
+        );
+        assert!(
+            wrote_outside,
+            "with full access on the agent still could not write outside the vault: {}",
+            panel.said()
+        );
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     #[ignore = "runs real OpenCode; costs a turn on the person's own plan"]
