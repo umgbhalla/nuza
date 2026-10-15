@@ -45,11 +45,25 @@ impl AppVaultTools {
         let mut server = locked(&self.server);
         if server.is_none() {
             match VaultServer::start() {
-                Ok(started) => *server = Some(Arc::new(started)),
+                Ok(started) => {
+                    // Read-only until the person says otherwise, which is what
+                    // the store holds. A server started later reads it then.
+                    started.set_writes(self.app.state::<Store>().full_access());
+                    *server = Some(Arc::new(started));
+                }
                 Err(error) => log::error!("the vault tools could not start: {error}"),
             }
         }
         server.clone()
+    }
+
+    /// Lets the running vault server change notes, or stops it, as the person
+    /// turns full access on and off. Nothing to do when it is not running:
+    /// the next one reads the store as it starts.
+    pub(crate) fn set_writes(&self, allowed: bool) {
+        if let Some(server) = self.running() {
+            server.set_writes(allowed);
+        }
     }
 }
 

@@ -26,6 +26,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -50,6 +51,17 @@ pub(crate) const TOOL_NAMES: [&str; 7] = [
     "notes_with_tag",
 ];
 
+/// The tools that change the vault, as opposed to reading it. They are listed
+/// and answered only while the person has given the agent full access, and
+/// deleting a note moves it to the trash rather than removing it.
+pub(crate) const WRITE_TOOL_NAMES: [&str; 5] = [
+    "create_note",
+    "append_note",
+    "edit_note",
+    "move_note",
+    "delete_note",
+];
+
 /// The most text one tool call answers with.
 const RESULT_LIMIT: usize = 12_000;
 const BODY_LIMIT: usize = 1 << 20;
@@ -68,11 +80,21 @@ pub(crate) struct Grant {
 }
 
 #[derive(Default)]
-struct Grants(Mutex<HashMap<String, Arc<Grant>>>);
+struct Grants {
+    tokens: Mutex<HashMap<String, Arc<Grant>>>,
+    /// Whether the agent may change the vault. Set when the person turns full
+    /// access on or off, and read when the tools are listed and when one is
+    /// called - so a session holding an old list of tools still cannot write.
+    writes: AtomicBool,
+}
 
 impl Grants {
     fn get(&self, token: &str) -> Option<Arc<Grant>> {
-        locked(&self.0).get(token).cloned()
+        locked(&self.tokens).get(token).cloned()
+    }
+
+    fn writes(&self) -> bool {
+        self.writes.load(Ordering::Relaxed)
     }
 }
 
@@ -113,7 +135,7 @@ impl VaultServer {
     /// Stops listening, and every token with it: the port is closed, and a
     /// request already on its way reads nothing.
     pub(crate) fn stop(&self) {
-        locked(&self.grants.0).clear();
+        locked(&self.grants.tokens).clear();
         if let Some(accepting) = &self.accepting {
             accepting.abort();
         }
@@ -132,13 +154,19 @@ impl VaultServer {
             root,
             given: Mutex::default(),
         };
-        locked(&self.grants.0).insert(token.clone(), Arc::new(grant));
+        locked(&self.grants.tokens).insert(token.clone(), Arc::new(grant));
         Some(token)
     }
 
     /// The token stops reading anything, at once.
     pub(crate) fn revoke(&self, token: &str) {
-        locked(&self.grants.0).remove(token);
+        locked(&self.grants.tokens).remove(token);
+    }
+
+    /// Lets the agent change the vault, or stops it. Read-only until this is
+    /// turned on, and read-only again the moment it is turned off.
+    pub(crate) fn set_writes(&self, allowed: bool) {
+        self.grants.writes.store(allowed, Ordering::Relaxed);
     }
 
     /// Whether `token` has been shown the note at `path` - so a citation of it
@@ -372,17 +400,21 @@ fn respond(grants: &Grants, request: &Request, port: u16) -> Response {
             "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"),
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Read-only tools over the writer's notes. Search before reading; cite notes you use.",
+            "instructions": if grants.writes() {
+                "Tools over the writer's notes. Search before reading; cite notes you use. This session can also change them, when asked to: edits go by paragraph, and a deleted note goes to the trash."
+            } else {
+                "Read-only tools over the writer's notes. Search before reading; cite notes you use."
+            },
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tool_list() })),
+        "tools/list" => Ok(json!({ "tools": tool_list(grants.writes()) })),
         "tools/call" => {
             let name = params
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
-            Ok(match call(&grant, name, &arguments) {
+            Ok(match call(&grant, name, &arguments, grants.writes()) {
                 Ok(text) => {
                     json!({ "content": [{ "type": "text", "text": text }], "isError": false })
                 }
@@ -404,7 +436,11 @@ fn respond(grants: &Grants, request: &Request, port: u16) -> Response {
 // ---------------------------------------------------------------------------
 
 /// The tools, described for the model: when to use each, with an example.
-fn tool_list() -> Value {
+///
+/// `writes` adds the five that change the vault, for a session the person has
+/// given full access. A session that holds a list from before that still
+/// cannot use them: `call` asks again.
+fn tool_list(writes: bool) -> Value {
     let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
         json!({
             "name": name,
@@ -412,7 +448,7 @@ fn tool_list() -> Value {
             "inputSchema": { "type": "object", "properties": properties, "required": required },
         })
     };
-    json!([
+    let mut tools = vec![
         tool(
             "search_vault",
             "Search the writer's notes for words. Returns matching lines with the note each is in. Use words likely to appear in the text, e.g. \"beta launch\".",
@@ -468,7 +504,57 @@ fn tool_list() -> Value {
             }),
             &["tag"],
         ),
-    ])
+    ];
+    if writes {
+        tools.extend([
+            tool(
+                "create_note",
+                "Make a new note. Fails if one is already there, so read first when unsure. New notes go to the trash like any other if deleted.",
+                json!({
+                    "path": { "type": "string", "description": "Where the note goes, as other tools give paths, e.g. \"projects/launch.md\". Must be inside the vault and end in .md." },
+                    "text": { "type": "string", "description": "All of it. Markdown, as it would read in the editor." },
+                }),
+                &["path", "text"],
+            ),
+            tool(
+                "append_note",
+                "Add to the end of a note, leaving what is already there untouched. Use it to jot something down, not to change a sentence - that is edit_note.",
+                json!({
+                    "path": { "type": "string", "description": "The note's path, as other tools give it." },
+                    "text": { "type": "string", "description": "What to add. A blank line is put between it and the note." },
+                }),
+                &["path", "text"],
+            ),
+            tool(
+                "edit_note",
+                "Replace one paragraph of a note, leaving every other paragraph byte for byte as it was. Paragraphs are the ones read_note numbers ¶1, ¶2… so {\"path\": \"projects/launch.md\", \"paragraph\": 3, \"text\": \"…\"} changes only ¶3. Read the note first, and quote the paragraph number you mean - it does not search by text.",
+                json!({
+                    "path": { "type": "string", "description": "The note's path, as other tools give it." },
+                    "paragraph": { "type": "integer", "description": "Which paragraph, as read_note numbered it. A heading is a paragraph too." },
+                    "text": { "type": "string", "description": "What the paragraph becomes." },
+                }),
+                &["path", "paragraph", "text"],
+            ),
+            tool(
+                "move_note",
+                "Move or rename a note, e.g. {\"path\": \"launch.md\", \"to\": \"projects/launch.md\"}. Overwrites nothing: it fails if something is already at the new path. [[links]] to the old path are left as they are - say so rather than rewriting other notes.",
+                json!({
+                    "path": { "type": "string", "description": "The note's path now." },
+                    "to": { "type": "string", "description": "Where it should be, inside the vault, ending in .md." },
+                }),
+                &["path", "to"],
+            ),
+            tool(
+                "delete_note",
+                "Move a note to the trash, where the writer can bring it back. Confirm with them first when you chose the note rather than being asked to delete it.",
+                json!({
+                    "path": { "type": "string", "description": "The note's path, as other tools give it." },
+                }),
+                &["path"],
+            ),
+        ]);
+    }
+    Value::Array(tools)
 }
 
 fn text_arg<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
@@ -549,6 +635,58 @@ fn find_note(grant: &Grant, path: &str) -> Result<(String, Note), String> {
         .ok_or_else(missing)
 }
 
+/// The file a new note goes to, if `path` names a place inside the vault.
+///
+/// Taken apart first, like `find_note`: nothing absolute, nothing that climbs
+/// with `..`, and nothing that is not a `.md`. The folder it goes in must not
+/// resolve out of the vault either, so a link inside the vault cannot be used
+/// to write somewhere else.
+fn new_note_path(grant: &Grant, path: &str) -> Result<PathBuf, String> {
+    let wanted = Path::new(path.trim().trim_start_matches("./"));
+    let bad =
+        || format!("{path} is not a path inside this folder. Give one like \"projects/launch.md\".");
+    if wanted.is_absolute()
+        || wanted.file_name().is_none()
+        || wanted
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(bad());
+    }
+    if !wanted.to_string_lossy().to_lowercase().ends_with(".md") {
+        return Err(format!("A note is a .md file, so {path} is not one."));
+    }
+    let (_, display_root) = notes_of(grant);
+    let folder = wanted.parent().unwrap_or_else(|| Path::new(""));
+    if let Ok(resolved) = display_root.join(folder).canonicalize() {
+        if !resolved.starts_with(&grant.root) {
+            return Err(bad());
+        }
+    }
+    Ok(display_root.join(wanted))
+}
+
+/// The note at `path`, for a tool that is about to change it: the same rules
+/// as `find_note` for where the path may point, but not the index. A note this
+/// session made a moment ago is not in the index yet, and the agent must be
+/// able to keep working on what it just wrote.
+fn writable_note(grant: &Grant, path: &str) -> Result<(String, PathBuf), String> {
+    let full = new_note_path(grant, path)?;
+    let key = path
+        .trim()
+        .trim_start_matches("./")
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    if !full.exists() {
+        return Err(format!(
+            "There is no note at {key}. Use list_notes or search_vault to find one."
+        ));
+    }
+    Ok((key, full))
+}
+
 /// A note's paragraphs: runs of non-blank lines, with the line each starts on.
 pub(crate) fn paragraphs(text: &str) -> Vec<(usize, String)> {
     let mut out: Vec<(usize, String)> = Vec::new();
@@ -588,7 +726,7 @@ fn heading_text(paragraph: &str) -> Option<&str> {
     (text.len() < first.len() && text.starts_with(' ')).then(|| text.trim())
 }
 
-fn call(grant: &Grant, name: &str, arguments: &Value) -> Result<String, String> {
+fn call(grant: &Grant, name: &str, arguments: &Value, writes: bool) -> Result<String, String> {
     let shown = |path: &str| {
         locked(&grant.given).insert(path.to_string());
     };
@@ -793,6 +931,120 @@ fn call(grant: &Grant, name: &str, arguments: &Value) -> Result<String, String> 
                 found.into_iter().take(limit).collect::<Vec<_>>().join("\n"),
             ))
         }
+        "create_note" if writes => {
+            let path = text_arg(arguments, "path").ok_or("Give the path the note should go at.")?;
+            let text = arguments
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or("Give the note's text.")?;
+            let full = new_note_path(grant, path)?;
+            if full.exists() {
+                return Err(format!(
+                    "There is already a note at {path}. Read it, or change it with edit_note."
+                ));
+            }
+            if let Some(folder) = full.parent() {
+                std::fs::create_dir_all(folder)
+                    .map_err(|error| format!("Could not make {}: {error}", folder.display()))?;
+            }
+            crate::files::write_atomically(&full, text.as_bytes())
+                .map_err(|error| format!("Could not write {path}: {error}"))?;
+            shown(path);
+            Ok(format!("Made {path}."))
+        }
+        "append_note" if writes => {
+            let path = text_arg(arguments, "path").ok_or("Give the note's path.")?;
+            let text = arguments
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or("Give the text to add.")?;
+            let (key, file) = writable_note(grant, path)?;
+            let mut whole = std::fs::read_to_string(&file)
+                .map_err(|error| format!("Could not read {key}: {error}"))?;
+            if !whole.is_empty() && !whole.ends_with('\n') {
+                whole.push('\n');
+            }
+            if !whole.trim().is_empty() {
+                whole.push('\n');
+            }
+            whole.push_str(text.trim_end());
+            whole.push('\n');
+            crate::files::write_atomically(&file, whole.as_bytes())
+                .map_err(|error| format!("Could not write {key}: {error}"))?;
+            shown(&key);
+            Ok(format!("Added to {key}."))
+        }
+        "edit_note" if writes => {
+            let path = text_arg(arguments, "path").ok_or("Give the note's path.")?;
+            let which = arguments
+                .get("paragraph")
+                .and_then(Value::as_u64)
+                .filter(|n| *n > 0)
+                .ok_or("Give the paragraph number read_note showed you, like 3.")?;
+            let text = arguments
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or("Give what the paragraph becomes.")?;
+            let (key, file) = writable_note(grant, path)?;
+            let whole = std::fs::read_to_string(&file)
+                .map_err(|error| format!("Could not read {key}: {error}"))?;
+            let found = paragraphs(&whole);
+            let at = which as usize;
+            let (start, current) = found.get(at - 1).ok_or_else(|| {
+                format!("{key} has {} paragraphs, so there is no ¶{at}.", found.len())
+            })?;
+            let mut lines: Vec<&str> = whole.lines().collect();
+            let ends_with_newline = whole.ends_with('\n');
+            lines.splice(
+                start - 1..start - 1 + current.lines().count(),
+                text.lines(),
+            );
+            let mut out = lines.join("\n");
+            if ends_with_newline {
+                out.push('\n');
+            }
+            crate::files::write_atomically(&file, out.as_bytes())
+                .map_err(|error| format!("Could not write {key}: {error}"))?;
+            shown(&key);
+            Ok(format!(
+                "¶{at} of {key} was:\n\n{}\n\nIt is now:\n\n{}",
+                current.trim(),
+                text.trim()
+            ))
+        }
+        "move_note" if writes => {
+            let path = text_arg(arguments, "path").ok_or("Give the note's path.")?;
+            let to = text_arg(arguments, "to").ok_or("Give where it should go.")?;
+            let (key, file) = writable_note(grant, path)?;
+            let full = new_note_path(grant, to)?;
+            if full.exists() {
+                return Err(format!("There is already something at {to}."));
+            }
+            if let Some(folder) = full.parent() {
+                std::fs::create_dir_all(folder)
+                    .map_err(|error| format!("Could not make {}: {error}", folder.display()))?;
+            }
+            std::fs::rename(&file, &full)
+                .map_err(|error| format!("Could not move {key} to {to}: {error}"))?;
+            shown(to);
+            Ok(format!(
+                "Moved {key} to {to}. Links to the old name were left alone."
+            ))
+        }
+        "delete_note" if writes => {
+            let path = text_arg(arguments, "path").ok_or("Give the note's path.")?;
+            let (key, file) = writable_note(grant, path)?;
+            trash::delete(&file)
+                .map_err(|error| format!("Could not move {key} to the trash: {error}"))?;
+            Ok(format!("Moved {key} to the trash."))
+        }
+        // A session that was given a list of tools before full access was
+        // turned off can still ask for one of these. Say why, rather than
+        // "no such tool", which would read as a mistake in its request.
+        _ if WRITE_TOOL_NAMES.contains(&name) => Err(format!(
+            "{name} changes the notes, and this session was not given full access. \
+             The writer turns it on in Settings, under AI."
+        )),
         _ => Err(format!("There is no tool called {name}.")),
     }
 }

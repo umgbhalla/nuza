@@ -399,6 +399,7 @@ pub(crate) async fn agent_set_full_access(
     window: WebviewWindow,
     allowed: bool,
     harness: State<'_, Arc<AgentHarness>>,
+    tools: State<'_, Arc<super::tools::AppVaultTools>>,
     store: State<'_, Store>,
 ) -> Result<bool, String> {
     if allowed && !store.full_access() {
@@ -421,6 +422,7 @@ pub(crate) async fn agent_set_full_access(
     }
     store.update(|decisions| decisions.full_access = allowed);
     harness.set_full_access(allowed);
+    tools.set_writes(allowed);
     Ok(allowed)
 }
 

@@ -110,9 +110,10 @@ fn every_tool_is_listed_with_a_description_and_a_schema() {
 }
 
 #[test]
-fn no_tool_can_write_and_none_is_called_anything_else() {
-    // A guard, so a "small" tool that writes cannot be added quietly: every
-    // name is one of the seven reading ones, and none sounds like a write.
+fn no_reading_tool_sounds_like_a_write_and_every_writing_tool_says_what_it_does() {
+    // A guard in two halves, so neither list can drift quietly: nothing the
+    // agent only reads is named like a change, and nothing it changes is
+    // named vaguely enough to hide among them.
     for name in TOOL_NAMES {
         for verb in [
             "write", "edit", "save", "delete", "create", "move", "rename", "append", "update",
@@ -123,6 +124,15 @@ fn no_tool_can_write_and_none_is_called_anything_else() {
             );
         }
     }
+    for name in WRITE_TOOL_NAMES {
+        assert!(
+            ["create", "append", "edit", "move", "delete"]
+                .iter()
+                .any(|verb| name.contains(verb)),
+            "{name} does not say what it does"
+        );
+    }
+    // A name that is no tool at all is still no tool, and says so.
     let opened = open(&[]);
     let server = server();
     let token = server.grant(opened.vault).unwrap();
@@ -133,6 +143,186 @@ fn no_tool_can_write_and_none_is_called_anything_else() {
         json!({ "path": "a.md", "text": "x" }),
     );
     assert!(error && said.contains("no tool"), "{said}");
+}
+
+#[test]
+fn the_writing_tools_are_listed_only_once_full_access_is_on() {
+    let opened = open(&[]);
+    let server = server();
+    let token = server.grant(opened.vault).unwrap();
+    let listed = |server: &VaultServer, token: &str| -> Vec<String> {
+        let response = respond(
+            server.grants(),
+            &request(
+                Some(token),
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+            ),
+            PORT,
+        );
+        response.body.unwrap()["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(listed(&server, &token), TOOL_NAMES.to_vec());
+    server.set_writes(true);
+    let with_writes = listed(&server, &token);
+    for name in TOOL_NAMES {
+        assert!(with_writes.contains(&name.to_string()), "{name} went missing");
+    }
+    for name in WRITE_TOOL_NAMES {
+        assert!(
+            with_writes.contains(&name.to_string()),
+            "{name} was not listed"
+        );
+    }
+    // And they go away again the moment it is turned off, even for a session
+    // that already holds the long list.
+    server.set_writes(false);
+    assert_eq!(listed(&server, &token), TOOL_NAMES.to_vec());
+}
+
+#[test]
+fn nothing_can_be_changed_until_full_access_is_turned_on() {
+    let opened = open(&[("a.md", "one\n\ntwo\n")]);
+    let server = server();
+    let token = server.grant(opened.vault).unwrap();
+    for name in WRITE_TOOL_NAMES {
+        let (said, error) = ask(
+            &server,
+            &token,
+            name,
+            json!({ "path": "a.md", "text": "x", "paragraph": 1, "to": "b.md" }),
+        );
+        assert!(error && said.contains("full access"), "{name}: {said}");
+    }
+    assert_eq!(
+        fs::read_to_string(opened.root.join("a.md")).unwrap(),
+        "one\n\ntwo\n"
+    );
+    assert!(!opened.root.join("b.md").exists());
+}
+
+#[test]
+fn with_full_access_a_note_can_be_made_changed_moved_and_deleted() {
+    let opened = open(&[("a.md", "one\n\ntwo\n")]);
+    let server = server();
+    let token = server.grant(opened.vault).unwrap();
+    server.set_writes(true);
+
+    let (said, error) = ask(
+        &server,
+        &token,
+        "create_note",
+        json!({ "path": "projects/launch.md", "text": "# Launch\n" }),
+    );
+    assert!(!error, "{said}");
+    assert_eq!(
+        fs::read_to_string(opened.root.join("projects/launch.md")).unwrap(),
+        "# Launch\n"
+    );
+
+    // A second note at the same path is refused, not written over.
+    let (said, error) = ask(
+        &server,
+        &token,
+        "create_note",
+        json!({ "path": "projects/launch.md", "text": "gone\n" }),
+    );
+    assert!(error && said.contains("already a note"), "{said}");
+    assert_eq!(
+        fs::read_to_string(opened.root.join("projects/launch.md")).unwrap(),
+        "# Launch\n"
+    );
+
+    let (said, error) = ask(
+        &server,
+        &token,
+        "append_note",
+        json!({ "path": "projects/launch.md", "text": "Timeline." }),
+    );
+    assert!(!error, "{said}");
+    assert_eq!(
+        fs::read_to_string(opened.root.join("projects/launch.md")).unwrap(),
+        "# Launch\n\nTimeline.\n"
+    );
+
+    // One paragraph changes; the one above it does not, and the answer says
+    // both so the writer can see what moved.
+    let (said, error) = ask(
+        &server,
+        &token,
+        "edit_note",
+        json!({ "path": "a.md", "paragraph": 2, "text": "TWO" }),
+    );
+    assert!(!error, "{said}");
+    assert!(said.contains("two") && said.contains("TWO"), "{said}");
+    assert_eq!(
+        fs::read_to_string(opened.root.join("a.md")).unwrap(),
+        "one\n\nTWO\n"
+    );
+    // There is no ¶9 in a two-paragraph note.
+    let (said, error) = ask(
+        &server,
+        &token,
+        "edit_note",
+        json!({ "path": "a.md", "paragraph": 9, "text": "x" }),
+    );
+    assert!(error && said.contains("no ¶9"), "{said}");
+
+    let (said, error) = ask(
+        &server,
+        &token,
+        "move_note",
+        json!({ "path": "a.md", "to": "archive/a.md" }),
+    );
+    assert!(!error, "{said}");
+    assert!(opened.root.join("archive/a.md").exists());
+    assert!(!opened.root.join("a.md").exists());
+    // Moving onto something is refused, never an overwrite.
+    let (said, error) = ask(
+        &server,
+        &token,
+        "move_note",
+        json!({ "path": "projects/launch.md", "to": "archive/a.md" }),
+    );
+    assert!(error && said.contains("already something"), "{said}");
+
+    // Delete moves it to the trash, so the file is gone from the vault.
+    let (said, error) = ask(&server, &token, "delete_note", json!({ "path": "archive/a.md" }));
+    assert!(!error, "{said}");
+    assert!(said.contains("trash"), "{said}");
+    assert!(!opened.root.join("archive/a.md").exists());
+}
+
+#[test]
+fn a_writing_tool_cannot_reach_outside_the_vault() {
+    let opened = open(&[("a.md", "one\n")]);
+    let outside = opened.root.parent().unwrap().join("outside.md");
+    let server = server();
+    let token = server.grant(opened.vault).unwrap();
+    server.set_writes(true);
+    for path in [
+        "../outside.md",
+        "/tmp/outside.md",
+        "notes/../../outside.md",
+        "a.txt",
+        "",
+    ] {
+        let (said, error) = ask(
+            &server,
+            &token,
+            "create_note",
+            json!({ "path": path, "text": "x" }),
+        );
+        assert!(error, "{path} was accepted: {said}");
+    }
+    assert!(!outside.exists());
+    // And a note that is not there is not a note to change.
+    let (said, error) = ask(&server, &token, "delete_note", json!({ "path": "missing.md" }));
+    assert!(error && said.contains("no note at"), "{said}");
 }
 
 #[test]
